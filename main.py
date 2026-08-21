@@ -62,10 +62,8 @@ def save_json(filepath, data):
     except Exception as e:
         print(f"Erro ao salvar {filepath}: {e}")
 
-# Wishlist formato: { "user_id_str": ["Pikachu", "Charizard"] }
 wishlists = load_json(WISHLIST_FILE, {})
 
-# Stats formato: { "total_spawns": 0, "rare_spawns": 0, "shiny_spawns": 0, "hints_solved": 0, "wishlist_pings": 0 }
 stats_data = load_json(STATS_FILE, {
     "total_spawns": 0,
     "rare_spawns": 0,
@@ -82,10 +80,6 @@ def increment_stat(key):
 # 3. HELPER DE HINT SOLVER & DETECÇÃO DE IMAGEM
 # ---------------------------------------------------------
 def solve_hint(hint_text: str):
-    """
-    Decodifica o formato de hint do Pokétwo (ex: "The pokémon is P_k_c_u.")
-    e compara com a lista de Pokémons conhecidos.
-    """
     match = re.search(r"the pokémon is ([^\.\n]+)", hint_text, re.IGNORECASE)
     if not match:
         return []
@@ -108,10 +102,6 @@ def solve_hint(hint_text: str):
     return matches
 
 def extract_pokemon_id_from_url(url: str):
-    """
-    Extrai o ID do Pokémon da URL da imagem do Pokétwo
-    ex: https://cdn.poketwo.net/images/25.png -> 25
-    """
     if not url:
         return None
     m = re.search(r'/(\d+)\.(png|jpg|jpeg|webp)', url, re.IGNORECASE)
@@ -120,7 +110,6 @@ def extract_pokemon_id_from_url(url: str):
     return None
 
 def get_users_with_pokemon_in_wishlist(pokemon_name: str):
-    """Retorna lista de IDs de usuários (mencionais <@id>) que têm o pokémon na wishlist."""
     target = pokemon_name.lower()
     user_ids = []
     for user_id, user_list in wishlists.items():
@@ -149,28 +138,25 @@ async def on_ready():
     print(f"📌 Monitorando canal ID: {CHANNEL_ID}")
     print(f"🔔 Pingando cargo ID: {ROLE_ID}")
     try:
+        # Sincronização global dos Comandos Slash
         synced = await bot.tree.sync()
         print(f"⚡ Sincronizados {len(synced)} comandos Slash com sucesso!")
     except Exception as e:
         print(f"❌ Erro ao sincronizar comandos Slash: {e}")
 
 # ---------------------------------------------------------
-# 5. PROCESSAMENTO DE MENSAGENS (Pokétwo, Hints, Spawns, Wishlist)
+# 5. PROCESSAMENTO DE MENSAGENS (Notificação Única por Spawn)
 # ---------------------------------------------------------
 @bot.event
 async def on_message(message):
-    # Evita que o bot responda a si mesmo
     if message.author == bot.user:
         return
 
-    # Processa comandos prefixados se houver
     await bot.process_commands(message)
 
-    # Só atua no canal de spawn configurado
     if message.channel.id != CHANNEL_ID:
         return
 
-    # Garante que a mensagem venha do Pokétwo
     if message.author.id == POKETWO_BOT_ID:
         
         # --- A. DETECÇÃO DE HINT DO POKÉTWO ---
@@ -180,26 +166,28 @@ async def on_message(message):
                 increment_stat("hints_solved")
                 matched_name = matches[0] if len(matches) == 1 else ", ".join(matches)
                 
-                # Resposta de Hint Resolvido
+                # Procura se algum usuário tem o Pokémon do hint na wishlist
+                wishlist_mentions = []
+                for p_name in matches:
+                    u_ids = get_users_with_pokemon_in_wishlist(p_name)
+                    for uid in u_ids:
+                        if f"<@{uid}>" not in wishlist_mentions:
+                            wishlist_mentions.append(f"<@{uid}>")
+
+                wishlist_text = ""
+                if wishlist_mentions:
+                    increment_stat("wishlist_pings")
+                    wishlist_text = f"\n🎯 **Wishlist:** {' '.join(wishlist_mentions)} este Pokémon está na sua lista!"
+
                 embed_hint = discord.Embed(
                     title="💡 Hint Resolvido!",
-                    description=f"O Pokémon é: **{matched_name}**",
+                    description=f"O Pokémon é: **{matched_name}**{wishlist_text}",
                     color=discord.Color.blue()
                 )
                 await message.channel.send(embed=embed_hint)
-
-                # Checa Wishlist para Pokémons encontrados no hint
-                for p_name in matches:
-                    users = get_users_with_pokemon_in_wishlist(p_name)
-                    if users:
-                        increment_stat("wishlist_pings")
-                        mentions = " ".join([f"<@{uid}>" for uid in users])
-                        await message.channel.send(
-                            f"🎯 {mentions} O Pokémon **{p_name}** que está na sua Wishlist foi identificado pelo Hint!"
-                        )
             return
 
-        # --- B. DETECÇÃO DE SPAWN DE POKÉMON ---
+        # --- B. DETECÇÃO DE SPAWN (NOTIFICAÇÃO ÚNICA EXCLUSIVA) ---
         is_spawn = False
         embed_image_url = None
         
@@ -217,53 +205,63 @@ async def on_message(message):
 
         if is_spawn:
             increment_stat("total_spawns")
-            print("🚨 Spawn detectado! Enviando notificação...")
-            
-            # Ping padrão do cargo configurado
-            await message.channel.send(f"<@&{ROLE_ID}> 🚨 **Um novo Pokémon selvagem apareceu!**")
+            print("🚨 Spawn detectado! Processando notificação única...")
 
-            # --- C. DETECÇÃO DE SHINY ---
-            if "✨" in message.content or "shiny" in message.content.lower():
-                increment_stat("shiny_spawns")
-                await message.channel.send("✨ **POKÉMON SHINY DETECTADO NO SPAWN!** ✨")
+            is_shiny = "✨" in message.content or "shiny" in message.content.lower()
+            is_rare = False
+            poke_name = None
+            wishlist_users = []
 
-            # --- D. DETECÇÃO POR URL DA IMAGEM (Raridade & Wishlist Imediata) ---
+            # Analisa URL da Imagem para identificar o Pokémon e Wishlist
             if embed_image_url:
                 poke_id = extract_pokemon_id_from_url(embed_image_url)
                 if poke_id and poke_id in POKEMON_BY_ID:
                     poke_name = POKEMON_BY_ID[poke_id]
-                    
-                    # 1. Filtro de Raridade (Lendário / Mítico / Ultra Beast)
                     if poke_id in RARE_POKEMON_IDS:
-                        increment_stat("rare_spawns")
-                        embed_rare = discord.Embed(
-                            title="🌟 POKÉMON RARO DETECTADO!",
-                            description=f"Um Pokémon de alta raridade (**{poke_name}**) apareceu no canal!",
-                            color=discord.Color.gold()
-                        )
-                        await message.channel.send(content=f"<@&{ROLE_ID}>", embed=embed_rare)
+                        is_rare = True
+                    wishlist_users = get_users_with_pokemon_in_wishlist(poke_name)
 
-                    # 2. Wishlist no Spawn Imediato
-                    users = get_users_with_pokemon_in_wishlist(poke_name)
-                    if users:
-                        increment_stat("wishlist_pings")
-                        mentions = " ".join([f"<@{uid}>" for uid in users])
-                        await message.channel.send(
-                            f"🎯 {mentions} O Pokémon **{poke_name}** apareceu no spawn e está na sua Wishlist!"
-                        )
+            wishlist_tag = ""
+            if wishlist_users:
+                increment_stat("wishlist_pings")
+                wishlist_tag = " 🎯 " + " ".join([f"<@{uid}>" for uid in wishlist_users])
+
+            # SISTEMA DE PRIORIDADE: Apenas 1 ÚNICA MENSAGEM é enviada por spawn!
+            if is_shiny:
+                increment_stat("shiny_spawns")
+                # Notificação Especial de SHINY
+                embed_shiny = discord.Embed(
+                    title="✨ POKÉMON SHINY DETECTADO! ✨",
+                    description=f"Um Pokémon **SHINY** selvagem acabou de aparecer!{wishlist_tag}",
+                    color=discord.Color.from_rgb(255, 215, 0)
+                )
+                await message.channel.send(content=f"<@&{ROLE_ID}>", embed=embed_shiny)
+
+            elif is_rare:
+                increment_stat("rare_spawns")
+                # Notificação Especial de RARIDADE (Lendário/Mítico/Ultra Beast)
+                embed_rare = discord.Embed(
+                    title="🌟 POKÉMON RARO DETECTADO!",
+                    description=f"Um Pokémon raro (**{poke_name}**) apareceu no canal!{wishlist_tag}",
+                    color=discord.Color.purple()
+                )
+                await message.channel.send(content=f"<@&{ROLE_ID}>", embed=embed_rare)
+
+            else:
+                # Notificação COMUM de Spawn
+                msg_content = f"<@&{ROLE_ID}> 🚨 **Um novo Pokémon selvagem apareceu!**{wishlist_tag}"
+                await message.channel.send(msg_content)
 
 # ---------------------------------------------------------
 # 6. COMANDOS SLASH (/wishlist, /ping, /status, /stats)
 # ---------------------------------------------------------
 
-# --- COMANDO /PING ---
-@bot.tree.command(name="ping", description="Verifica a latência e tempo de resposta do bot.")
+@bot.tree.command(name="ping", description="Verifica a latência do bot.")
 async def slash_ping(interaction: discord.Interaction):
     latency = round(bot.latency * 1000)
     await interaction.response.send_message(f"🏓 **Pong!** Latência da API: `{latency}ms`", ephemeral=True)
 
-# --- COMANDO /STATUS ---
-@bot.tree.command(name="status", description="Exibe o status atual e painel de informações do bot.")
+@bot.tree.command(name="status", description="Exibe o status atual do bot.")
 async def slash_status(interaction: discord.Interaction):
     uptime_seconds = int(time.time() - START_TIME)
     hours, remainder = divmod(uptime_seconds, 3600)
@@ -275,7 +273,7 @@ async def slash_status(interaction: discord.Interaction):
         color=discord.Color.green()
     )
     embed.add_field(name="Status HTTP Server", value="🟢 Online (24/7 Keep-Alive)", inline=False)
-    embed.add_field(name="Tempo de Atividade (Uptime)", value=f"`{uptime_str}`", inline=True)
+    embed.add_field(name="Uptime", value=f"`{uptime_str}`", inline=True)
     embed.add_field(name="Latência API", value=f"`{round(bot.latency * 1000)}ms`", inline=True)
     embed.add_field(name="Canal Monitorado", value=f"<#{CHANNEL_ID}>", inline=False)
     embed.add_field(name="Cargo Notificado", value=f"<@&{ROLE_ID}>", inline=False)
@@ -283,8 +281,7 @@ async def slash_status(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed)
 
-# --- COMANDO /STATS ---
-@bot.tree.command(name="stats", description="Exibe estatísticas de spawns, raros e hints resolvidos no servidor.")
+@bot.tree.command(name="stats", description="Exibe estatísticas de spawns e hints.")
 async def slash_stats(interaction: discord.Interaction):
     embed = discord.Embed(
         title="📊 Estatísticas do Servidor",
@@ -307,10 +304,8 @@ async def wishlist_add(interaction: discord.Interaction, pokemon: str):
     user_id_str = str(interaction.user.id)
     search_name = pokemon.strip().lower()
     
-    # Valida nome do Pokémon contra a base de 1025 Pokémons
     official_name = None
     if search_name in POKEMON_BY_NAME:
-        # Encontra nome com capitalização oficial
         for p in POKEMON_LIST:
             if p["name"].lower() == search_name:
                 official_name = p["name"]
@@ -388,12 +383,8 @@ async def wishlist_clear(interaction: discord.Interaction):
         save_json(WISHLIST_FILE, wishlists)
     await interaction.response.send_message("🧹 Sua wishlist foi limpa!", ephemeral=True)
 
-# Adiciona o grupo de comandos /wishlist ao bot
 bot.tree.add_command(wishlist_group)
 
-# ---------------------------------------------------------
-# 7. INICIALIZAÇÃO
-# ---------------------------------------------------------
 if __name__ == "__main__":
     keep_alive()
     if not DISCORD_TOKEN:
