@@ -2,6 +2,7 @@ import os
 import re
 import json
 import time
+import random
 import threading
 import discord
 from discord.ext import commands
@@ -161,10 +162,6 @@ async def on_ready():
 # 5. PROCESSAMENTO DE NOTIFICAÇÃO ÚNICA DE SPAWN/HINT
 # ---------------------------------------------------------
 async def process_spawn_notification(channel, content: str, embed_image_url: str = None, force_poke_name: str = None, is_shiny_override: bool = False):
-    """
-    Função centralizada para notificação de Spawns com prioridade estrita:
-    Shiny > Raro > Comum, incluindo marcas da Wishlist sem duplicação de mensagens.
-    """
     increment_stat("total_spawns")
     
     is_shiny = is_shiny_override or ("✨" in content or "shiny" in content.lower())
@@ -172,7 +169,6 @@ async def process_spawn_notification(channel, content: str, embed_image_url: str
     poke_name = force_poke_name
     wishlist_users = []
 
-    # Se recebeu URL de imagem do embed, descobre o ID e Nome
     if embed_image_url and not poke_name:
         poke_id = extract_pokemon_id_from_url(embed_image_url)
         if poke_id and poke_id in POKEMON_BY_ID:
@@ -180,7 +176,6 @@ async def process_spawn_notification(channel, content: str, embed_image_url: str
             if poke_id in RARE_POKEMON_IDS:
                 is_rare = True
 
-    # Se o nome do pokémon foi forçado no teste, verifica se é raro
     if poke_name:
         norm = normalize_name(poke_name)
         if norm in POKEMON_NORMALIZED_MAP:
@@ -194,7 +189,6 @@ async def process_spawn_notification(channel, content: str, embed_image_url: str
         increment_stat("wishlist_pings")
         wishlist_tag = " 🎯 " + " ".join([f"<@{uid}>" for uid in wishlist_users])
 
-    # SISTEMA DE NOTIFICAÇÃO ÚNICA COM HIERARQUIA
     if is_shiny:
         increment_stat("shiny_spawns")
         embed_shiny = discord.Embed(
@@ -326,7 +320,7 @@ async def slash_stats(interaction: discord.Interaction):
 @bot.tree.command(name="testspawn", description="[ADM] Simula eventos do Pokétwo para testar notificações e Wishlist.")
 @app_commands.describe(
     tipo="Escolha o tipo de teste a ser simulado",
-    pokemon="Nome de um Pokémon opcional para testar (ex: Pikachu, Rayquaza)"
+    pokemon="Nome de um Pokémon opcional para testar (ex: Charizard, Rayquaza, Mewtwo)"
 )
 @app_commands.choices(tipo=[
     app_commands.Choice(name="1. Spawn Comum", value="comum"),
@@ -336,7 +330,6 @@ async def slash_stats(interaction: discord.Interaction):
 ])
 @app_commands.default_permissions(administrator=True)
 async def slash_testspawn(interaction: discord.Interaction, tipo: app_commands.Choice[str], pokemon: str = None):
-    # Trava de Segurança: Apenas Administradores do servidor podem executar
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("❌ Apenas Administradores do servidor podem usar este comando de teste!", ephemeral=True)
         return
@@ -345,32 +338,38 @@ async def slash_testspawn(interaction: discord.Interaction, tipo: app_commands.C
     test_type = tipo.value
     target_poke = pokemon.strip() if pokemon else None
 
-    # Resposta ephemeral apenas para o Admin confirmando que o teste foi iniciado
     await interaction.response.send_message(
-        f"🧪 **[Simulação ADM]** Disparando teste do tipo `{test_type}` (Pokémon: `{target_poke or 'Padrão'}`)...",
+        f"🧪 **[Simulação ADM]** Disparando teste do tipo `{test_type}`...",
         ephemeral=True
     )
 
+    # Escolhe um Pokémon aleatório da Pokédex se o usuário não especificar um
+    random_common = random.choice([p["name"] for p in POKEMON_LIST if p["id"] not in RARE_POKEMON_IDS])
+    random_rare_id = random.choice(list(RARE_POKEMON_IDS))
+    random_rare = POKEMON_BY_ID.get(random_rare_id, "Rayquaza")
+
     if test_type == "comum":
-        chosen_poke = target_poke or "Pidgey"
+        chosen_poke = target_poke or random_common
         await process_spawn_notification(channel=channel, content="A wild pokémon has appeared!", force_poke_name=chosen_poke)
 
     elif test_type == "raro":
-        chosen_poke = target_poke or "Rayquaza"
+        chosen_poke = target_poke or random_rare
         await process_spawn_notification(channel=channel, content="A wild pokémon has appeared!", force_poke_name=chosen_poke)
 
     elif test_type == "shiny":
-        chosen_poke = target_poke or "Pikachu"
+        chosen_poke = target_poke or random_common
         await process_spawn_notification(channel=channel, content="✨ A wild shiny pokémon has appeared!", force_poke_name=chosen_poke, is_shiny_override=True)
 
     elif test_type == "hint":
-        chosen_poke = target_poke or "Pikachu"
-        # Garante que o nome exista ou usa Pikachu
+        chosen_poke = target_poke or random.choice(POKEMON_LIST)["name"]
         norm = normalize_name(chosen_poke)
-        official_name = POKEMON_NORMALIZED_MAP.get(norm, "Pikachu")
+        official_name = POKEMON_NORMALIZED_MAP.get(norm, chosen_poke)
+        
+        # Gera o padrão oculta (ex: P_k_c_u)
         pattern = generate_hint_pattern(official_name)
         hint_msg = f"The pokémon is {pattern}."
         
+        # O Solver resolve o padrão
         matches = solve_hint(hint_msg)
         increment_stat("hints_solved")
         matched_name = matches[0] if matches else official_name
@@ -388,7 +387,7 @@ async def slash_testspawn(interaction: discord.Interaction, tipo: app_commands.C
 
         embed_hint = discord.Embed(
             title="💡 [TESTE SIMULADO] Hint Resolvido!",
-            description=f"O Pokémon é: **{matched_name}**{wishlist_text}",
+            description=f"O Pokétwo disse: `{hint_msg}`\n\n💡 O Pokémon é: **{matched_name}**{wishlist_text}",
             color=discord.Color.blue()
         )
         await channel.send(embed=embed_hint)
