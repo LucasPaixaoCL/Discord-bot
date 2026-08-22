@@ -18,11 +18,10 @@ except ImportError:
     POKEMON_BY_NAME = {}
     RARE_POKEMON_IDS = set()
 
-# Helper para normalizar nomes (remove pontuações e espaços para facilitar busca)
+# Helper para normalizar nomes (remove pontuações e espaços)
 def normalize_name(name: str):
     return re.sub(r'[^a-z0-9]', '', name.lower())
 
-# Mapeamento normalizado -> Nome oficial (ex: "mr mime" ou "mr. mime" -> "Mr. Mime")
 POKEMON_NORMALIZED_MAP = {normalize_name(p["name"]): p["name"] for p in POKEMON_LIST}
 
 # ---------------------------------------------------------
@@ -108,6 +107,14 @@ def solve_hint(hint_text: str):
     matches = [poke["name"] for poke in POKEMON_LIST if compiled.match(poke["name"])]
     return matches
 
+def generate_hint_pattern(pokemon_name: str):
+    """Gera uma string de hint oculta para testes (ex: Pikachu -> P_k_c_u)"""
+    chars = list(pokemon_name)
+    for i in range(len(chars)):
+        if i % 2 == 1 and chars[i].isalnum():
+            chars[i] = '_'
+    return "".join(chars)
+
 def extract_pokemon_id_from_url(url: str):
     if not url:
         return None
@@ -151,8 +158,65 @@ async def on_ready():
         print(f"❌ Erro ao sincronizar comandos Slash: {e}")
 
 # ---------------------------------------------------------
-# 5. PROCESSAMENTO DE MENSAGENS (Notificação Única por Spawn)
+# 5. PROCESSAMENTO DE NOTIFICAÇÃO ÚNICA DE SPAWN/HINT
 # ---------------------------------------------------------
+async def process_spawn_notification(channel, content: str, embed_image_url: str = None, force_poke_name: str = None, is_shiny_override: bool = False):
+    """
+    Função centralizada para notificação de Spawns com prioridade estrita:
+    Shiny > Raro > Comum, incluindo marcas da Wishlist sem duplicação de mensagens.
+    """
+    increment_stat("total_spawns")
+    
+    is_shiny = is_shiny_override or ("✨" in content or "shiny" in content.lower())
+    is_rare = False
+    poke_name = force_poke_name
+    wishlist_users = []
+
+    # Se recebeu URL de imagem do embed, descobre o ID e Nome
+    if embed_image_url and not poke_name:
+        poke_id = extract_pokemon_id_from_url(embed_image_url)
+        if poke_id and poke_id in POKEMON_BY_ID:
+            poke_name = POKEMON_BY_ID[poke_id]
+            if poke_id in RARE_POKEMON_IDS:
+                is_rare = True
+
+    # Se o nome do pokémon foi forçado no teste, verifica se é raro
+    if poke_name:
+        norm = normalize_name(poke_name)
+        if norm in POKEMON_NORMALIZED_MAP:
+            poke_id = POKEMON_BY_NAME.get(norm)
+            if poke_id and poke_id in RARE_POKEMON_IDS:
+                is_rare = True
+        wishlist_users = get_users_with_pokemon_in_wishlist(poke_name)
+
+    wishlist_tag = ""
+    if wishlist_users:
+        increment_stat("wishlist_pings")
+        wishlist_tag = " 🎯 " + " ".join([f"<@{uid}>" for uid in wishlist_users])
+
+    # SISTEMA DE NOTIFICAÇÃO ÚNICA COM HIERARQUIA
+    if is_shiny:
+        increment_stat("shiny_spawns")
+        embed_shiny = discord.Embed(
+            title="✨ POKÉMON SHINY DETECTADO! ✨",
+            description=f"Um Pokémon **SHINY** selvagem acabou de aparecer!{wishlist_tag}",
+            color=discord.Color.from_rgb(255, 215, 0)
+        )
+        await channel.send(content=f"<@&{ROLE_ID}>", embed=embed_shiny)
+
+    elif is_rare:
+        increment_stat("rare_spawns")
+        embed_rare = discord.Embed(
+            title="🌟 POKÉMON RARO DETECTADO!",
+            description=f"Um Pokémon raro (**{poke_name or 'Lendário/Mítico'}**) apareceu no canal!{wishlist_tag}",
+            color=discord.Color.purple()
+        )
+        await channel.send(content=f"<@&{ROLE_ID}>", embed=embed_rare)
+
+    else:
+        msg_content = f"<@&{ROLE_ID}> 🚨 **Um novo Pokémon selvagem apareceu!**{wishlist_tag}"
+        await channel.send(msg_content)
+
 @bot.event
 async def on_message(message):
     if message.author == bot.user:
@@ -192,7 +256,7 @@ async def on_message(message):
                 await message.channel.send(embed=embed_hint)
             return
 
-        # --- B. DETECÇÃO DE SPAWN (NOTIFICAÇÃO ÚNICA EXCLUSIVA) ---
+        # --- B. DETECÇÃO DE SPAWN ---
         is_spawn = False
         embed_image_url = None
         
@@ -209,51 +273,14 @@ async def on_message(message):
                 embed_image_url = embed.image.url
 
         if is_spawn:
-            increment_stat("total_spawns")
-            print("🚨 Spawn detectado! Processando notificação única...")
-
-            is_shiny = "✨" in message.content or "shiny" in message.content.lower()
-            is_rare = False
-            poke_name = None
-            wishlist_users = []
-
-            if embed_image_url:
-                poke_id = extract_pokemon_id_from_url(embed_image_url)
-                if poke_id and poke_id in POKEMON_BY_ID:
-                    poke_name = POKEMON_BY_ID[poke_id]
-                    if poke_id in RARE_POKEMON_IDS:
-                        is_rare = True
-                    wishlist_users = get_users_with_pokemon_in_wishlist(poke_name)
-
-            wishlist_tag = ""
-            if wishlist_users:
-                increment_stat("wishlist_pings")
-                wishlist_tag = " 🎯 " + " ".join([f"<@{uid}>" for uid in wishlist_users])
-
-            if is_shiny:
-                increment_stat("shiny_spawns")
-                embed_shiny = discord.Embed(
-                    title="✨ POKÉMON SHINY DETECTADO! ✨",
-                    description=f"Um Pokémon **SHINY** selvagem acabou de aparecer!{wishlist_tag}",
-                    color=discord.Color.from_rgb(255, 215, 0)
-                )
-                await message.channel.send(content=f"<@&{ROLE_ID}>", embed=embed_shiny)
-
-            elif is_rare:
-                increment_stat("rare_spawns")
-                embed_rare = discord.Embed(
-                    title="🌟 POKÉMON RARO DETECTADO!",
-                    description=f"Um Pokémon raro (**{poke_name}**) apareceu no canal!{wishlist_tag}",
-                    color=discord.Color.purple()
-                )
-                await message.channel.send(content=f"<@&{ROLE_ID}>", embed=embed_rare)
-
-            else:
-                msg_content = f"<@&{ROLE_ID}> 🚨 **Um novo Pokémon selvagem apareceu!**{wishlist_tag}"
-                await message.channel.send(msg_content)
+            await process_spawn_notification(
+                channel=message.channel,
+                content=message.content,
+                embed_image_url=embed_image_url
+            )
 
 # ---------------------------------------------------------
-# 6. COMANDOS SLASH (/wishlist, /ping, /status, /stats)
+# 6. COMANDOS SLASH (/wishlist, /ping, /status, /stats, /testspawn)
 # ---------------------------------------------------------
 
 @bot.tree.command(name="ping", description="Verifica a latência do bot.")
@@ -295,6 +322,77 @@ async def slash_stats(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed)
 
+# --- COMANDO DE TESTE EXCLUSIVO DE ADMINISTRADOR ---
+@bot.tree.command(name="testspawn", description="[ADM] Simula eventos do Pokétwo para testar notificações e Wishlist.")
+@app_commands.describe(
+    tipo="Escolha o tipo de teste a ser simulado",
+    pokemon="Nome de um Pokémon opcional para testar (ex: Pikachu, Rayquaza)"
+)
+@app_commands.choices(tipo=[
+    app_commands.Choice(name="1. Spawn Comum", value="comum"),
+    app_commands.Choice(name="2. Spawn Raro (Lendário/Mítico)", value="raro"),
+    app_commands.Choice(name="3. Spawn Shiny", value="shiny"),
+    app_commands.Choice(name="4. Pokétwo Hint", value="hint")
+])
+@app_commands.default_permissions(administrator=True)
+async def slash_testspawn(interaction: discord.Interaction, tipo: app_commands.Choice[str], pokemon: str = None):
+    # Trava de Segurança: Apenas Administradores do servidor podem executar
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ Apenas Administradores do servidor podem usar este comando de teste!", ephemeral=True)
+        return
+
+    channel = bot.get_channel(CHANNEL_ID) or interaction.channel
+    test_type = tipo.value
+    target_poke = pokemon.strip() if pokemon else None
+
+    # Resposta ephemeral apenas para o Admin confirmando que o teste foi iniciado
+    await interaction.response.send_message(
+        f"🧪 **[Simulação ADM]** Disparando teste do tipo `{test_type}` (Pokémon: `{target_poke or 'Padrão'}`)...",
+        ephemeral=True
+    )
+
+    if test_type == "comum":
+        chosen_poke = target_poke or "Pidgey"
+        await process_spawn_notification(channel=channel, content="A wild pokémon has appeared!", force_poke_name=chosen_poke)
+
+    elif test_type == "raro":
+        chosen_poke = target_poke or "Rayquaza"
+        await process_spawn_notification(channel=channel, content="A wild pokémon has appeared!", force_poke_name=chosen_poke)
+
+    elif test_type == "shiny":
+        chosen_poke = target_poke or "Pikachu"
+        await process_spawn_notification(channel=channel, content="✨ A wild shiny pokémon has appeared!", force_poke_name=chosen_poke, is_shiny_override=True)
+
+    elif test_type == "hint":
+        chosen_poke = target_poke or "Pikachu"
+        # Garante que o nome exista ou usa Pikachu
+        norm = normalize_name(chosen_poke)
+        official_name = POKEMON_NORMALIZED_MAP.get(norm, "Pikachu")
+        pattern = generate_hint_pattern(official_name)
+        hint_msg = f"The pokémon is {pattern}."
+        
+        matches = solve_hint(hint_msg)
+        increment_stat("hints_solved")
+        matched_name = matches[0] if matches else official_name
+
+        wishlist_mentions = []
+        u_ids = get_users_with_pokemon_in_wishlist(official_name)
+        for uid in u_ids:
+            if f"<@{uid}>" not in wishlist_mentions:
+                wishlist_mentions.append(f"<@{uid}>")
+
+        wishlist_text = ""
+        if wishlist_mentions:
+            increment_stat("wishlist_pings")
+            wishlist_text = f"\n🎯 **Wishlist:** {' '.join(wishlist_mentions)} este Pokémon está na sua lista!"
+
+        embed_hint = discord.Embed(
+            title="💡 [TESTE SIMULADO] Hint Resolvido!",
+            description=f"O Pokémon é: **{matched_name}**{wishlist_text}",
+            color=discord.Color.blue()
+        )
+        await channel.send(embed=embed_hint)
+
 # --- GRUPO DE COMANDOS /WISHLIST ---
 wishlist_group = app_commands.Group(name="wishlist", description="Gerencie sua Lista de Desejos de Pokémons.")
 
@@ -304,7 +402,6 @@ async def wishlist_add(interaction: discord.Interaction, pokemon: str):
     user_id_str = str(interaction.user.id)
     input_norm = normalize_name(pokemon)
     
-    # VALIDAÇÃO RÍGIDA DA POKÉDEX (1025 Pokémons)
     if input_norm not in POKEMON_NORMALIZED_MAP:
         await interaction.response.send_message(
             f"❌ **\"{pokemon}\"** não foi encontrado na Pokédex oficial! Por favor, verifique o nome (em inglês) e tente novamente.",
