@@ -189,25 +189,32 @@ async def process_spawn_notification(channel, content: str, embed_image_url: str
         increment_stat("wishlist_pings")
         wishlist_tag = " 🎯 " + " ".join([f"<@{uid}>" for uid in wishlist_users])
 
+    # HIERARQUIA DE NOTIFICAÇÕES
     if is_shiny:
         increment_stat("shiny_spawns")
+        shiny_content = f"<@&{ROLE_ID}> ✨ **POKÉMON SHINY DETECTADO!** ✨{wishlist_tag}"
         embed_shiny = discord.Embed(
             title="✨ POKÉMON SHINY DETECTADO! ✨",
             description=f"Um Pokémon **SHINY** selvagem acabou de aparecer!{wishlist_tag}",
             color=discord.Color.from_rgb(255, 215, 0)
         )
-        await channel.send(content=f"<@&{ROLE_ID}>", embed=embed_shiny)
+        await channel.send(content=shiny_content, embed=embed_shiny)
 
     elif is_rare:
         increment_stat("rare_spawns")
+        # Inclui o NOME DO POKÉMON diretamente no texto do ping para aparecer na barra de notificações do celular/PC!
+        rare_name_display = poke_name or 'Lendário/Mítico'
+        rare_content = f"<@&{ROLE_ID}> 🌟 **POKÉMON RARO DETECTADO: {rare_name_display}!**{wishlist_tag}"
+        
         embed_rare = discord.Embed(
             title="🌟 POKÉMON RARO DETECTADO!",
-            description=f"Um Pokémon raro (**{poke_name or 'Lendário/Mítico'}**) apareceu no canal!{wishlist_tag}",
+            description=f"Um Pokémon raro (**{rare_name_display}**) apareceu no canal!{wishlist_tag}",
             color=discord.Color.purple()
         )
-        await channel.send(content=f"<@&{ROLE_ID}>", embed=embed_rare)
+        await channel.send(content=rare_content, embed=embed_rare)
 
     else:
+        # Notificação comum permanece genérica (apenas o cargo)
         msg_content = f"<@&{ROLE_ID}> 🚨 **Um novo Pokémon selvagem apareceu!**{wishlist_tag}"
         await channel.send(msg_content)
 
@@ -343,7 +350,6 @@ async def slash_testspawn(interaction: discord.Interaction, tipo: app_commands.C
         ephemeral=True
     )
 
-    # Escolhe um Pokémon aleatório da Pokédex se o usuário não especificar um
     random_common = random.choice([p["name"] for p in POKEMON_LIST if p["id"] not in RARE_POKEMON_IDS])
     random_rare_id = random.choice(list(RARE_POKEMON_IDS))
     random_rare = POKEMON_BY_ID.get(random_rare_id, "Rayquaza")
@@ -365,11 +371,9 @@ async def slash_testspawn(interaction: discord.Interaction, tipo: app_commands.C
         norm = normalize_name(chosen_poke)
         official_name = POKEMON_NORMALIZED_MAP.get(norm, chosen_poke)
         
-        # Gera o padrão oculta (ex: P_k_c_u)
         pattern = generate_hint_pattern(official_name)
         hint_msg = f"The pokémon is {pattern}."
         
-        # O Solver resolve o padrão
         matches = solve_hint(hint_msg)
         increment_stat("hints_solved")
         matched_name = matches[0] if matches else official_name
