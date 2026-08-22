@@ -18,6 +18,13 @@ except ImportError:
     POKEMON_BY_NAME = {}
     RARE_POKEMON_IDS = set()
 
+# Helper para normalizar nomes (remove pontuações e espaços para facilitar busca)
+def normalize_name(name: str):
+    return re.sub(r'[^a-z0-9]', '', name.lower())
+
+# Mapeamento normalizado -> Nome oficial (ex: "mr mime" ou "mr. mime" -> "Mr. Mime")
+POKEMON_NORMALIZED_MAP = {normalize_name(p["name"]): p["name"] for p in POKEMON_LIST}
+
 # ---------------------------------------------------------
 # 1. SERVIDOR WEB FLASK (Health Check para Render / UptimeRobot)
 # ---------------------------------------------------------
@@ -110,10 +117,10 @@ def extract_pokemon_id_from_url(url: str):
     return None
 
 def get_users_with_pokemon_in_wishlist(pokemon_name: str):
-    target = pokemon_name.lower()
+    target_norm = normalize_name(pokemon_name)
     user_ids = []
     for user_id, user_list in wishlists.items():
-        if any(p.lower() == target for p in user_list):
+        if any(normalize_name(p) == target_norm for p in user_list):
             user_ids.append(user_id)
     return user_ids
 
@@ -138,7 +145,6 @@ async def on_ready():
     print(f"📌 Monitorando canal ID: {CHANNEL_ID}")
     print(f"🔔 Pingando cargo ID: {ROLE_ID}")
     try:
-        # Sincronização global dos Comandos Slash
         synced = await bot.tree.sync()
         print(f"⚡ Sincronizados {len(synced)} comandos Slash com sucesso!")
     except Exception as e:
@@ -166,7 +172,6 @@ async def on_message(message):
                 increment_stat("hints_solved")
                 matched_name = matches[0] if len(matches) == 1 else ", ".join(matches)
                 
-                # Procura se algum usuário tem o Pokémon do hint na wishlist
                 wishlist_mentions = []
                 for p_name in matches:
                     u_ids = get_users_with_pokemon_in_wishlist(p_name)
@@ -212,7 +217,6 @@ async def on_message(message):
             poke_name = None
             wishlist_users = []
 
-            # Analisa URL da Imagem para identificar o Pokémon e Wishlist
             if embed_image_url:
                 poke_id = extract_pokemon_id_from_url(embed_image_url)
                 if poke_id and poke_id in POKEMON_BY_ID:
@@ -226,10 +230,8 @@ async def on_message(message):
                 increment_stat("wishlist_pings")
                 wishlist_tag = " 🎯 " + " ".join([f"<@{uid}>" for uid in wishlist_users])
 
-            # SISTEMA DE PRIORIDADE: Apenas 1 ÚNICA MENSAGEM é enviada por spawn!
             if is_shiny:
                 increment_stat("shiny_spawns")
-                # Notificação Especial de SHINY
                 embed_shiny = discord.Embed(
                     title="✨ POKÉMON SHINY DETECTADO! ✨",
                     description=f"Um Pokémon **SHINY** selvagem acabou de aparecer!{wishlist_tag}",
@@ -239,7 +241,6 @@ async def on_message(message):
 
             elif is_rare:
                 increment_stat("rare_spawns")
-                # Notificação Especial de RARIDADE (Lendário/Mítico/Ultra Beast)
                 embed_rare = discord.Embed(
                     title="🌟 POKÉMON RARO DETECTADO!",
                     description=f"Um Pokémon raro (**{poke_name}**) apareceu no canal!{wishlist_tag}",
@@ -248,7 +249,6 @@ async def on_message(message):
                 await message.channel.send(content=f"<@&{ROLE_ID}>", embed=embed_rare)
 
             else:
-                # Notificação COMUM de Spawn
                 msg_content = f"<@&{ROLE_ID}> 🚨 **Um novo Pokémon selvagem apareceu!**{wishlist_tag}"
                 await message.channel.send(msg_content)
 
@@ -299,22 +299,23 @@ async def slash_stats(interaction: discord.Interaction):
 wishlist_group = app_commands.Group(name="wishlist", description="Gerencie sua Lista de Desejos de Pokémons.")
 
 @wishlist_group.command(name="add", description="Adiciona um Pokémon à sua Lista de Desejos.")
-@app_commands.describe(pokemon="Nome do Pokémon (ex: Pikachu, Charizard)")
+@app_commands.describe(pokemon="Nome do Pokémon (ex: Pikachu, Charizard, Rayquaza)")
 async def wishlist_add(interaction: discord.Interaction, pokemon: str):
     user_id_str = str(interaction.user.id)
-    search_name = pokemon.strip().lower()
+    input_norm = normalize_name(pokemon)
     
-    official_name = None
-    if search_name in POKEMON_BY_NAME:
-        for p in POKEMON_LIST:
-            if p["name"].lower() == search_name:
-                official_name = p["name"]
-                break
-    else:
-        official_name = pokemon.strip().capitalize()
+    # VALIDAÇÃO RÍGIDA DA POKÉDEX (1025 Pokémons)
+    if input_norm not in POKEMON_NORMALIZED_MAP:
+        await interaction.response.send_message(
+            f"❌ **\"{pokemon}\"** não foi encontrado na Pokédex oficial! Por favor, verifique o nome (em inglês) e tente novamente.",
+            ephemeral=True
+        )
+        return
 
+    official_name = POKEMON_NORMALIZED_MAP[input_norm]
     user_list = wishlists.get(user_id_str, [])
-    if any(p.lower() == search_name for p in user_list):
+
+    if any(normalize_name(p) == input_norm for p in user_list):
         await interaction.response.send_message(
             f"⚠️ **{official_name}** já está na sua wishlist!", ephemeral=True
         )
@@ -331,17 +332,17 @@ async def wishlist_add(interaction: discord.Interaction, pokemon: str):
     save_json(WISHLIST_FILE, wishlists)
 
     await interaction.response.send_message(
-        f"✅ **{official_name}** foi adicionado à sua wishlist com sucesso!", ephemeral=True
+        f"✅ **{official_name}** foi validado e adicionado à sua wishlist com sucesso!", ephemeral=True
     )
 
 @wishlist_group.command(name="remove", description="Remove um Pokémon da sua Lista de Desejos.")
 @app_commands.describe(pokemon="Nome do Pokémon a ser removido")
 async def wishlist_remove(interaction: discord.Interaction, pokemon: str):
     user_id_str = str(interaction.user.id)
-    search_name = pokemon.strip().lower()
+    input_norm = normalize_name(pokemon)
 
     user_list = wishlists.get(user_id_str, [])
-    new_list = [p for p in user_list if p.lower() != search_name]
+    new_list = [p for p in user_list if normalize_name(p) != input_norm]
 
     if len(new_list) == len(user_list):
         await interaction.response.send_message(
